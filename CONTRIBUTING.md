@@ -21,9 +21,15 @@ pnpm dev:web                       # 起 Web(5173)
 ## 提交前
 
 ```bash
-pnpm typecheck                     # 检查前端 / 渲染 / 共享包（TS）
-pnpm test
+# 后端（Python）
+cd server && pip install -r requirements-dev.txt
+ruff check app tests && pytest
+
+# 前端 / 渲染 / 共享包（TS）
+pnpm typecheck
 ```
+
+CI 会自动跑这两套检查（见 `.github/workflows/ci.yml`）。
 
 几点约定：
 
