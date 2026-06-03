@@ -1,0 +1,42 @@
+
+# Mindreel — 一键启动
+# 用法:
+#   docker compose up -d
+#   浏览器打开 http://localhost:5173，在 /providers 自行配置 LLM 与 TTS。
+#
+# 本项目不捆绑任何 LLM/TTS 服务，由你选择自己的 provider（任何 OpenAI 兼容接口）：
+#   - LLM：DeepSeek / 通义 / OpenAI / 本机 Ollama 等
+#   - TTS：OpenAI TTS 官方，或你自建的兼容服务
+# 详见 README「配置」。
+
+services:
+  # ── API 服务器（Python / FastAPI；渲染由内置 Node/Remotion 子进程负责）──────
+  # 注意:首次构建需装 Node+Python+Chromium+中文字体并预拉 Remotion 浏览器，较慢。
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "4123:4123"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - AUTO_PROVIDER_MODE=configured
+      - AUTO_API_PORT=4123
+      - AUTO_API_HOST=0.0.0.0
+      - AUTO_DATA_DIR=/app/data
+    # 让容器能用 http://host.docker.internal 访问宿主机的 Ollama / 本机其它服务（Linux 也兼容）。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ── Web 工作台前端（React + Vite）────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
