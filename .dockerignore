@@ -1,0 +1,27 @@
+# 构建上下文排除（避免把 346MB data / node_modules 等传进镜像，显著加速构建）
+**/node_modules
+**/dist
+**/build
+**/.turbo
+**/.vite
+
+# 运行期数据（通过 volume 挂载，不需进镜像）
+apps/api/data
+data
+
+# 渲染产物 / 大文件
+**/*.mp4
+**/*.mp3
+**/*.wav
+
+# 本地配置与密钥
+**/providers.json
+**/.env
+**/.env.local
+
+# 版本控制与杂项
+.git
+.github
+**/*.log
+.DS_Store
+examples/**/*.mp4

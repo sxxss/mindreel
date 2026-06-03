@@ -1,0 +1,34 @@
+node_modules
+dist
+build
+.traces
+.DS_Store
+*.log
+
+# 密钥与本地配置（务必不要提交）
+**/.env
+**/.env.local
+**/providers.json
+
+# local tooling / IDE
+.idea
+.claude
+.superpowers
+.pnpm-store
+.tts-venv
+
+# runtime data, generated artifacts and local DB
+data
+packages/eval/reports
+
+# 本地 Docker 开发覆盖（自带 TTS 等，不进仓库）
+docker-compose.override.yml
+
+# AI 工具的内部规划/spec 文档，不开源
+docs/superpowers/
+.superpowers/
+
+# Python 后端
+server/.venv
+__pycache__/
+*.pyc

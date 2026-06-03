@@ -1,0 +1,11 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  '@swc/core': true
+  esbuild: true
+  msw: true
+onlyBuiltDependencies:
+  - "@swc/core"
+  - esbuild
+  - msw
