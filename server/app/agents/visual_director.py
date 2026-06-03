@@ -1,9 +1,11 @@
 """visual-director agent —— 把每章旁白编排成一组 HtmlSlide 分镜。
 
-核心三件事：
+核心：
 1. 域感知可视化：按 project.topic 推断内容域，注入该领域专用的画面模式。
-2. 按章【顺序】生成：每次只产出一章的 scene（小输出更稳，避免一次性生成全片被截断）。
-3. HtmlSlide props 兜底修复：模型偶尔漏 steps / 写非法 props，单个坏场景不应拖垮整片。
+2. 两步生成（关键的可靠性设计）：A 步只让模型产出很小的【结构 JSON】(step 的 id/caption + shots，
+   不含 HTML)，几乎不可能出错；B 步让模型把每屏 HTML 以 `@@@HTML:<id>` 纯文本分隔块输出
+   （没有 JSON，也就没有「大段 HTML 转义进 JSON 字符串」那一整类解析崩溃）。代码再把两者拼成 scene。
+3. 失败重试（逐轮升温）+ 文本兜底：保证单章永不拖垮整片。
 
 最后用一个确定性 critic 校验章序、beat 覆盖、shot 时序与画面密度。
 """
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from pydantic import BaseModel, ValidationError, field_validator
@@ -25,11 +28,14 @@ from ..models import (
     ScriptSegment,
     Shot,
 )
-from ..providers import ProviderError, generate_json
+from ..providers import ProviderError, _parse_content, complete_text, generate_json
 from .prompting import build_system_prompt, with_revision_instructions
 from .runner import Emit
 
 ANIMATION_OP_KINDS = ["enter", "exit", "move", "morph", "highlight", "trace", "annotate"]
+
+# 输出协议分隔符：HTML 不进 JSON，避免「大段 HTML 转义进 JSON 字符串」导致的解析崩溃。
+STEP_HTML_DELIM = "@@@HTML:"
 
 
 # ── HtmlSlide props 模型（用于生成 schema 提示 + 校验/修复）──────────────────────
@@ -69,10 +75,82 @@ class DraftScene(BaseModel):
     shots: list[Shot]
 
 
-class ChapterSceneOutput(BaseModel):
-    """单章输出包成对象 {scenes:[...]}：json_object 模式下顶层必须是对象。"""
-    model_config = {"extra": "forbid"}
-    scenes: list[DraftScene]
+# ── 结构 JSON 模型（不含 HTML）——「结构 JSON + HTML 分隔块」输出协议的 JSON 部分 ──
+# 思路：让模型先输出很小的结构 JSON（steps 只有 id+caption，没有 HTML），
+# 再把每屏 HTML 以 `@@@HTML:<id>` 分隔块原文输出。HTML 永不进 JSON 字符串，
+# 「大段 HTML 转义进 JSON」这一整类解析失败因此消失。代码再把两者拼成正式 scene。
+class StructStep(BaseModel):
+    model_config = {"extra": "ignore"}
+    id: str
+    caption: str | None = None
+    html: str | None = None  # 模型若没守协议、把 html 塞进 JSON 里，这里也接住
+
+
+class StructScene(BaseModel):
+    model_config = {"extra": "ignore"}
+    sceneId: str
+    title: str | None = None
+    steps: list[StructStep]
+    shots: list[Shot]
+
+
+class ChapterStructure(BaseModel):
+    model_config = {"extra": "ignore"}
+    scenes: list[StructScene]
+
+
+def _extract_html_blocks(text: str) -> dict[str, str]:
+    """从 `@@@HTML:<id>\\n<html...>` 形式的分隔块里抽出每个 step 的 HTML 原文。"""
+    blocks: dict[str, str] = {}
+    pattern = re.compile(
+        re.escape(STEP_HTML_DELIM) + r"[ \t]*(\S+)[ \t]*\r?\n(.*?)(?=\r?\n" + re.escape(STEP_HTML_DELIM) + r"|\Z)",
+        re.DOTALL,
+    )
+    for m in pattern.finditer(text):
+        sid = m.group(1).strip()
+        html = m.group(2).strip()
+        if html.startswith("```"):  # 容忍模型给 HTML 也套了围栏
+            html = re.sub(r"^```[a-zA-Z]*\s*", "", html)
+            html = re.sub(r"\s*```$", "", html).strip()
+        if html:
+            blocks[sid] = html
+    return blocks
+
+
+def _assemble_scenes(struct: ChapterStructure, html_blocks: dict[str, str],
+                     chapter_id: str) -> list[DraftScene]:
+    """把结构（steps 的 id/caption/shots）+ 各 step 的 HTML 拼成 DraftScene。
+    任一 step 既无分隔块也无内联 html → 抛错，交上层重试/兜底。"""
+    scenes: list[DraftScene] = []
+    for sc in struct.scenes:
+        steps: list[dict[str, Any]] = []
+        for st in sc.steps:
+            html = html_blocks.get(st.id) or (st.html or "")
+            if not html.strip():
+                raise ProviderError(f"step {st.id} 缺少 HTML（既无分隔块也无内联）")
+            step: dict[str, Any] = {"html": html}
+            if st.caption and st.caption.strip():
+                step["caption"] = st.caption.strip()
+            steps.append(step)
+        if not steps:
+            raise ProviderError(f"scene {sc.sceneId} 没有任何 step")
+        props: dict[str, Any] = {"steps": steps[:12]}
+        if sc.title and sc.title.strip():
+            props = {"title": sc.title.strip(), "steps": steps[:12]}
+        scenes.append(DraftScene(chapterId=chapter_id, sceneId=sc.sceneId,
+                                 templateId="HtmlSlide", props=props, shots=sc.shots))
+    if not scenes:
+        raise ProviderError("结构里没有 scene")
+    return scenes
+
+
+def parse_chapter_payload(raw: str, chapter_id: str) -> list[DraftScene]:
+    """单条文本里「结构 JSON + HTML 分隔块」的拼装（用于单测/兼容单调用）。"""
+    idx = raw.find(STEP_HTML_DELIM)
+    json_part = raw[:idx] if idx != -1 else raw
+    struct = ChapterStructure.model_validate(_parse_content(json_part))
+    html_blocks = _extract_html_blocks(raw[idx:]) if idx != -1 else {}
+    return _assemble_scenes(struct, html_blocks, chapter_id)
 
 
 # ── 主题域检测 ────────────────────────────────────────────────────────────────
@@ -129,11 +207,12 @@ DOMAIN_VISUAL_PATTERNS: dict[str, str] = {
 
 # ── 通用规则（所有域共享）──────────────────────────────────────────────────────
 HTMLSLIDE_UNIVERSAL_RULES = [
-    "【输出】本章产出 1-2 个 scene，templateId 一律为 HtmlSlide；每个 beat 必须被某个 shot 覆盖且只覆盖一次，shot.beatRefs 只能引用本章 estimatedSchedule 里的 beatId。",
+    "【输出】本章只产出 1 个 scene，templateId 一律为 HtmlSlide；每个 beat 必须被某个 shot 覆盖且只覆盖一次，shot.beatRefs 只能引用本章 estimatedSchedule 里的 beatId。",
     "【shot/动画】每个 shot 至少一个 animationOp（targetRef 指向画面元素或 beat 关键词）；shot 按 estimatedSchedule 的 anchorTimeMs 单调递增排布；animationOp.kind 只能是 "
     + " / ".join(ANIMATION_OP_KINDS)
     + "（严禁 zoom/scale/fade 等）。",
-    "【steps 跟着旁白走，节奏慢】steps 数量≈本章 beat 数（一句旁白=一步），画面切换不要比旁白快。每步至少停 4-5 秒，宁少不多。",
+    "【steps 跟着旁白走，节奏慢】steps 控制在 2-5 个（beat 多时把相邻几句合并到一个 step，不必一句一步）；画面切换不要比旁白快，每步至少停 4-5 秒，宁少不多。",
+    "【精简】每个 step 的 HTML 写紧凑些（建议 ≤1500 字符），只放必要元素、多用工具类少堆重复内联样式。",
     "【严禁把旁白写进画面】系统会单独渲染字幕条，html 里绝对不要出现旁白原句/整句解说（如「你看，三步之后…」这类口语句子）。画面里只放：标题、关键词标签、数值、状态名、图示元素。caption 字段只写一句简短提示，不要把它再画进 html。",
     "【绝不重叠】所有元素要留足间距、互不重叠：时序图里客户端列与服务器列要拉开（如 left:18% 与 left:72%），数据包标签放在两列之间的连线上方、不要压在节点圆圈或状态徽标上；状态徽标放节点下方并留 20px 以上间距。宁可元素少一点，也不要挤在一起糊成一团。",
     "【每步铺满 + 深色底 + 鲜艳元素】每步占满 1920×1080，不留大片空白；背景深色（var(--bg)，不要整屏浅色），靠 accent 彩色元素提亮——面板/方块/徽章/边框上色（cyan/orange/pink/green），每屏 2-3 种 accent 色，活跃元素加 .active。",
@@ -143,12 +222,6 @@ HTMLSLIDE_UNIVERSAL_RULES = [
     "【逐元素入场动画】每步至少 3 个主要元素加动画类：.hs-enter（淡入+上移）、.hs-pop（缩放）、.hs-slide-left（横滑）、.hs-glow（发光，适合结论）。用 style=\"--hs-delay:0\" / 0.15 / 0.3 / 0.45 做错位入场。",
     "审美红线：不要紫粉渐变背景、不要 emoji 堆砌、不要假图标，克制专业、有信息密度。",
 ]
-
-
-def _html_slide_schema_hint() -> str:
-    return "HtmlSlide 的 props JSON Schema：\n" + json.dumps(
-        HtmlSlideProps.model_json_schema(), ensure_ascii=False, indent=2
-    )
 
 
 # ── 旁白时间估算 ──────────────────────────────
@@ -177,38 +250,57 @@ def estimate_beat_schedule(segment: ScriptSegment) -> list[dict[str, Any]]:
     return out
 
 
-# ── 提示词构建 ────────────────────────────────────────────────────────────────
-def build_chapter_system_prompt(chapter, topic: str) -> str:
-    domain = detect_visual_domain(topic)
+# ── 提示词构建（两步：A 结构 JSON / B 各 step 的 HTML 纯文本）─────────────────────
+def build_structure_system_prompt(chapter) -> str:
+    """A 步：只规划骨架（小 JSON，无 HTML）——极稳。"""
     constraints = [
-        f'本次只为章节「{chapter.id}」（{chapter.title}）产出 scene；输出一个 JSON 对象 '
-        f'{{"scenes": [...]}}，每个元素 chapterId 必须等于「{chapter.id}」、templateId 必须是 HtmlSlide。',
+        f"只为章节「{chapter.id}」（{chapter.title}）规划【1 个】scene 的骨架，绝不写 HTML、steps 里不要 html 字段。",
+        "steps 控制在 2-5 个：每个 step 给一个稳定 id（如 s1、s2）和一句简短 caption（这一屏讲什么）。",
+        "每个 beat 必须被某个 shot 覆盖且只覆盖一次；shot.beatRefs 只能引用本章 estimatedSchedule 里的 beatId；"
+        "shot 至少一个 animationOp（targetRef 指向某个 step 的 id）；shot 按 anchorTimeMs 单调递增；"
+        "animationOp.kind 只能是 " + " / ".join(ANIMATION_OP_KINDS) + "。",
+        "所有数值字段（anchorTimeMs/durationMs/pauseAfterMs 等）必须是纯整数。",
     ]
     if chapter.kind == "hook":
-        constraints.append("这是整支视频开场：第一页做成标题/引入页（醒目大标题 + 一句钩子/悬念），再进入正题。")
-    constraints.append(DOMAIN_VISUAL_PATTERNS[domain])
-    constraints.extend(HTMLSLIDE_UNIVERSAL_RULES)
-    constraints.append(_html_slide_schema_hint())
+        constraints.append("开场章：第一个 step 做成标题/钩子页。")
     return build_system_prompt(
-        role="你是一位信息可视化导演。你把一章旁白编排成一组用 HtmlSlide 现写的、画面勤变的分镜（每个 scene 是一页自包含 HTML 演示）。",
-        schema=ChapterSceneOutput,
-        constraints=constraints,
+        role="你是视频分镜的结构规划师。只产出 scene 的骨架 JSON（不画 HTML）。",
+        schema=ChapterStructure, constraints=constraints,
     )
 
 
-def build_chapter_user_prompt(project: Project, chapter, segment: ScriptSegment) -> str:
+def build_structure_user_prompt(project: Project, chapter, segment: ScriptSegment) -> str:
     return "\n\n".join([
-        '只输出一个 JSON 对象 {"scenes": [...]}（scenes 是本章 1-2 个 HtmlSlide），不要解释。',
+        "请规划本章 1 个 scene 的骨架（结构 JSON，不要 HTML）。",
         f"项目：{project.title} | 主题：{project.topic} | 受众：{project.audience}",
-        "本章 beat 文本里已含具体数值/例子，请沿用；全片用同一个例子，不要换数字。",
         "本章：\n" + json.dumps({
-            "id": chapter.id,
-            "title": chapter.title,
-            "learningGoal": chapter.learningGoal,
-            "kind": chapter.kind,
-            "expectedSeconds": chapter.expectedSeconds,
+            "id": chapter.id, "title": chapter.title, "learningGoal": chapter.learningGoal,
+            "kind": chapter.kind, "expectedSeconds": chapter.expectedSeconds,
             "estimatedSchedule": estimate_beat_schedule(segment),
         }, ensure_ascii=False, indent=2),
+    ])
+
+
+def build_html_system_prompt(topic: str) -> str:
+    """B 步：为每个 step 写一屏 HTML，纯文本分隔块输出（没有 JSON，崩不了）。"""
+    domain = detect_visual_domain(topic)
+    return "\n\n".join([
+        "你是信息可视化导演，为给定的每个 step 写一屏自包含 HTML（画面 1920×1080）。",
+        DOMAIN_VISUAL_PATTERNS[domain],
+        "画面与节奏规则：\n" + "\n".join(f"- {r}" for r in HTMLSLIDE_UNIVERSAL_RULES),
+        "【输出格式·必须严格遵守】只输出 HTML 块，不要 JSON、不要解释、不要 ``` 围栏。"
+        "给定的每个 step 对应一块：先单独一行写 `@@@HTML:<该 step 的 id>`，"
+        "下一行起是这一屏的 HTML 原文（可多行、想用双引号就用双引号、不要转义）。"
+        "为每个 step id 各写一块，数量一一对应。",
+    ])
+
+
+def build_html_user_prompt(project: Project, steps: list[dict[str, Any]]) -> str:
+    return "\n\n".join([
+        f"项目：{project.title} | 主题：{project.topic} | 受众：{project.audience}",
+        "请为下面每个 step 写一屏 HTML（按领域规则作画，沿用主题里的具体数值/例子，全片用同一个例子）。"
+        "对每个 step 输出 `@@@HTML:<id>` 分隔块：",
+        json.dumps(steps, ensure_ascii=False, indent=2),
     ])
 
 
@@ -371,45 +463,54 @@ async def _generate_chapter_scenes(
     project: Project, chapter, segment: ScriptSegment, llm: ProviderEntry,
     revision_notes: list[str], emit: Emit | None,
 ) -> list[DraftScene]:
-    system = build_chapter_system_prompt(chapter, project.topic)
-    base_user = build_chapter_user_prompt(project, chapter, segment)
+    struct_system = build_structure_system_prompt(chapter)
+    struct_user = build_structure_user_prompt(project, chapter, segment)
+    html_system = build_html_system_prompt(project.topic)
 
-    async def call_llm(extra_note: str, temperature: float = 0.3) -> list[DraftScene]:
-        user = with_revision_instructions(
-            f"{base_user}\n\n{extra_note}" if extra_note else base_user, revision_notes
+    async def gen_once(temp_struct: float, temp_html: float) -> list[DraftScene]:
+        # A 步：结构 JSON（小、无 HTML，极稳）
+        raw_struct = await generate_json(
+            llm, system=struct_system,
+            user=with_revision_instructions(struct_user, revision_notes), temperature=temp_struct,
         )
-        raw = await generate_json(llm, system=system, user=user, temperature=temperature)
-        parsed = ChapterSceneOutput.model_validate(raw)
-        return [s.model_copy(update={"chapterId": chapter.id}) for s in parsed.scenes]
+        struct = ChapterStructure.model_validate(raw_struct)
+        # B 步：各 step 的 HTML，纯文本分隔块（没有 JSON，崩不了）
+        steps = [{"id": st.id, "caption": st.caption}
+                 for sc in struct.scenes for st in sc.steps]
+        raw_html = await complete_text(
+            llm, system=html_system, user=build_html_user_prompt(project, steps),
+            temperature=temp_html,
+        )
+        blocks = _extract_html_blocks(raw_html)
+        return _assemble_scenes(struct, blocks, chapter.id)
 
     def has_invalid(scenes: list[DraftScene]) -> bool:
         return any(s.templateId == "HtmlSlide" and not _props_valid(s.props) for s in scenes)
 
-    needs_refine = False
+    scenes: list[DraftScene] | None = None
     try:
-        scenes = await call_llm("")
+        scenes = await gen_once(0.3, 0.4)
     except (ValidationError, ProviderError):
-        # 首次没拿到可用画面 → 先用本章 beat 合成最小可用场景，并标记需要精修一次
-        scenes = [_fallback_scene(chapter, segment)]
-        needs_refine = True
+        scenes = None
 
-    if needs_refine or has_invalid(scenes):
-        # 面向用户的中性提示：不暴露内部字段名，呈现为「自动精修」而非报错
+    if scenes is None or has_invalid(scenes):
         if emit:
             res = emit("scene.refine", f"正在精修章节「{chapter.id}」的画面…")
             if res is not None:
                 await res
-        try:
-            retried = await call_llm(
-                '【重要修正】上一次有 scene 的 HtmlSlide props 不合法。务必保证每个 scene 的 props 形如 '
-                '{"title"?:"...","steps":[{"html":"<...>","caption"?:"..."}, ...]}：'
-                "steps 必填、至少 1 个，每个 step 的 html 是非空字符串。不要省略 steps 字段。",
-                temperature=0.7,
-            )
-            if not has_invalid(retried) or len(retried) >= len(scenes):
+        for ts, th in ((0.5, 0.7), (0.8, 0.9)):  # 逐轮升温再试
+            try:
+                retried = await gen_once(ts, th)
+            except (ValidationError, ProviderError):
+                continue
+            if not has_invalid(retried):
                 scenes = retried
-        except (ValidationError, ProviderError):
-            pass
+                break
+            if scenes is None:
+                scenes = retried
+
+    if scenes is None:
+        scenes = [_fallback_scene(chapter, segment)]
 
     beat_text_by_id = {b.id: b.text for b in segment.beats}
     fallback_beats = [{"id": b.id, "text": b.text} for b in segment.beats]

@@ -99,13 +99,23 @@ def _repair_json(text: str) -> str:
     while i < n:
         ch = text[i]
         if in_str:
-            out.append(ch)
             if esc:
+                out.append(ch)
                 esc = False
             elif ch == "\\":
+                out.append(ch)
                 esc = True
             elif ch == '"':
+                out.append(ch)
                 in_str = False
+            elif ch == "\n":      # 字符串内的真实换行/制表符是非法 JSON，转义掉
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            else:
+                out.append(ch)
             i += 1
             continue
         if ch == '"':
@@ -121,15 +131,21 @@ def _repair_json(text: str) -> str:
                 out.append(": 0")
                 i += 1
                 continue
-            # 冒号后是「非法起始字符的杂串 + 数字」→ 删掉杂串，保留数字
+            # 冒号后是非法的值起始字符（模型把数值字段写成了乱码 token，
+            # 如 `島25`、`𝑥`、`Duration.FromSeconds(2)`）→ 提取其中的数字；
+            # 没有数字就补 0。扫到下一个分隔符为止，遇到引号说明其实是字符串值，放弃。
             if j < n and text[j] not in _VALUE_START and text[j] not in ",}]":
                 m = j
-                while m < n and text[m] not in _VALUE_START and text[m] not in ' \t\r\n,}]"':
+                while m < n and text[m] not in ',}]"':
                     m += 1
-                if m < n and text[m] in "0123456789":
-                    out.append(":")
-                    i = m  # 跳过冒号后的空白与杂串，直达数字
+                if m < n and text[m] == '"':
+                    out.append(ch)  # 值其实是字符串，别动
+                    i += 1
                     continue
+                num = re.search(r"\d+", text[j:m])
+                out.append(": " + (num.group(0) if num else "0"))
+                i = m
+                continue
         if ch == ",":
             j = i + 1
             while j < n and text[j] in " \t\r\n":
@@ -198,6 +214,36 @@ async def generate_json(cfg: ProviderEntry, *, system: str, user: str,
         raise ProviderError(f"LLM {resp.status_code}: {resp.text[:200]}")
     content = resp.json()["choices"][0]["message"].get("content") or ""
     return _parse_content(content)
+
+
+async def complete_text(cfg: ProviderEntry, *, system: str, user: str,
+                        temperature: float = 0.3, max_tokens: int = 16384) -> str:
+    """返回模型的原始文本（不强制 JSON）。用于「结构 JSON + HTML 分隔块」这种
+    HTML 不进 JSON 的输出协议——HTML 当纯文本拿回来，避免转义导致的 JSON 损坏。"""
+    if not cfg.baseUrl:
+        raise ProviderError("LLM 未配置 baseUrl，请在 /providers 设置")
+    headers = {"Content-Type": "application/json"}
+    if cfg.apiKey:
+        headers["Authorization"] = f"Bearer {cfg.apiKey}"
+    body = {
+        "model": cfg.model or "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await _post_with_retry(
+            client, f"{_trim_base(cfg.baseUrl)}/chat/completions", headers=headers, json_body=body
+        )
+    if resp.status_code >= 400:
+        raise ProviderError(f"LLM {resp.status_code}: {resp.text[:200]}")
+    content = resp.json()["choices"][0]["message"].get("content") or ""
+    if not content.strip():
+        raise ProviderError("模型返回了空内容")
+    return content
 
 
 async def synthesize_speech(cfg: ProviderEntry, *, text: str, voice: str | None = None,

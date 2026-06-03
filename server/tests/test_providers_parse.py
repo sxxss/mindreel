@@ -48,6 +48,16 @@ def test_strips_junk_char_before_number():
     assert r["prerequisites"] == ["a", "b"]
 
 
+def test_repairs_non_numeric_value_token():
+    # 模型把数值字段写成纯乱码 token（无数字）→ 补 0
+    assert _parse_content('{"anchorTimeMs": 𝑥, "durationMs": 400}') == {"anchorTimeMs": 0, "durationMs": 400}
+
+
+def test_escapes_raw_newline_in_string():
+    # html 字符串里有真实换行（非法 JSON）→ 转义后可解析
+    assert _parse_content('{"html": "<div>\n  line2</div>"}') == {"html": "<div>\n  line2</div>"}
+
+
 def test_balanced_spans_ignores_nested_arrays():
     # 外层对象坏掉时，不能把里面合法的嵌套数组当顶层结果
     spans = _balanced_spans('{"a":1,"list":[1,2,3]}')
