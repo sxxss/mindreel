@@ -8,6 +8,7 @@
     "dev:api": "cd server && uvicorn app.main:app --reload --port 4123",
     "build": "pnpm --filter @auto/shared build && pnpm --filter @auto/scenes build && pnpm --filter @auto/render build && pnpm --filter @auto/web build",
     "test": "pnpm --filter @auto/shared test && pnpm --filter @auto/scenes test && pnpm --filter @auto/render test && pnpm --filter @auto/web test",
+    "version:set": "node scripts/bump-version.mjs",
     "lint": "pnpm typecheck",
     "typecheck": "pnpm --filter @auto/shared typecheck && pnpm --filter @auto/scenes typecheck && pnpm --filter @auto/render typecheck && pnpm --filter @auto/web typecheck"
   },
