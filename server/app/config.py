@@ -34,5 +34,9 @@ class Settings(BaseSettings):
     def providers_file(self) -> Path:
         return self.providers_path or (self.data_dir / "providers.json")
 
+    @property
+    def app_settings_file(self) -> Path:
+        return self.data_dir / "settings" / "app.json"
+
 
 settings = Settings()

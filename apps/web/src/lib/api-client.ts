@@ -30,6 +30,10 @@ import {
   ProviderTestResultSchema,
   SourceDocumentSchema,
   type SourceDocument,
+  SystemInfoSchema,
+  type SystemInfo,
+  AppSettingsSchema,
+  type AppSettings,
 } from "@auto/shared";
 
 type Parser<T> = {
@@ -143,12 +147,19 @@ export const apiClient = {
       ProviderTestResultSchema,
       { method: "POST" },
     ),
+  system: () => fetchJson("/api/system", SystemInfoSchema),
+  appSettings: () => fetchJson("/api/settings", AppSettingsSchema),
+  saveAppSettings: (input: AppSettings) =>
+    sendJson("/api/settings", AppSettingsSchema.parse(input), AppSettingsSchema, {
+      method: "PUT",
+    }),
   projectMediaUrl: (projectId: string, path: string) =>
     createApiUrl(`/api/projects/${projectId}/media?path=${encodeURIComponent(path)}`),
   projectWebDeckUrl: (projectId: string) =>
     createApiUrl(`/api/projects/${projectId}/export/web`),
 };
 
+export type { SystemInfo, AppSettings };
 export type ProjectSummary = ProjectListItem;
 export type ProjectDetail = Project;
 export type ProviderSummary = ProviderConfig;

@@ -17,6 +17,7 @@ from . import pipeline, render_bridge, store
 from .config import settings
 from .models import (
     AppendSourceInput,
+    AppSettings,
     CreateProjectInput,
     Project,
     ProviderConfig,
@@ -63,10 +64,11 @@ def list_projects() -> list[dict]:
 def create_project(body: CreateProjectInput) -> Project:
     pid = store.new_id()
     ts = store.now_iso()
+    app_cfg = store.load_app_settings()
     project = Project(
         id=pid, title=body.title, topic=body.topic, audience=body.audience,
         durationTargetSeconds=body.durationTargetSeconds, language=body.language,
-        theme=body.theme or "deep-space", sources=[], createdAt=ts, updatedAt=ts,
+        theme=body.theme or app_cfg.newProjectTheme, sources=[], createdAt=ts, updatedAt=ts,
         status="active", latestArtifacts={},
     )
     return store.save_project(project)
@@ -246,6 +248,45 @@ async def test_provider(body: dict) -> dict:
         return {"ok": True, "message": "LLM 可用", "latencyMs": 0}
     except ProviderError as e:
         return {"ok": False, "message": str(e), "latencyMs": 0}
+
+
+# ── 系统信息 / 全局设置 ────────────────────────────────────────────────────────
+def _provider_status(entry) -> dict:
+    """脱敏的 provider 连接状态（不返回 apiKey）。"""
+    disabled = entry.provider == "disabled"
+    return {
+        "provider": entry.provider,
+        "configured": bool(not disabled and entry.baseUrl and entry.apiKey),
+        "baseUrl": entry.baseUrl or "",
+        "model": entry.model or "",
+        "voice": entry.voice or "",
+    }
+
+
+@app.get("/api/system")
+def system_info() -> dict:
+    cfg = store.load_providers()
+    return {
+        "version": app.version,
+        "providerMode": settings.provider_mode,
+        "dataDir": str(settings.data_dir.resolve()),
+        "projectsDir": str(settings.projects_dir.resolve()),
+        "providersPath": str(settings.providers_file.resolve()),
+        "projectCount": store.project_count(),
+        "storageBytes": store.storage_bytes(),
+        "llm": _provider_status(cfg.llm),
+        "tts": _provider_status(cfg.tts),
+    }
+
+
+@app.get("/api/settings")
+def get_settings() -> AppSettings:
+    return store.load_app_settings()
+
+
+@app.put("/api/settings")
+def put_settings(body: AppSettings) -> AppSettings:
+    return store.save_app_settings(body)
 
 
 def _digest(text: str) -> str:

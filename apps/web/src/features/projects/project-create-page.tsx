@@ -1,10 +1,11 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
 import type { CreateProjectInput } from "@auto/shared";
 
 import {
   useAppendSourceMutation,
+  useAppSettingsQuery,
   useCreateJobMutation,
   useCreateProjectMutation,
 } from "./queries.ts";
@@ -26,6 +27,20 @@ export const ProjectCreatePage = () => {
   const appendSourceMutation = useAppendSourceMutation();
   const createJobMutation = useCreateJobMutation();
   const [form, setForm] = useState<CreateProjectInput>(defaultForm);
+  const appSettingsQuery = useAppSettingsQuery();
+  const defaultsApplied = useRef(false);
+
+  // 用全局「新项目默认值」预填一次（仅在用户尚未改动表单时）。
+  useEffect(() => {
+    if (defaultsApplied.current || !appSettingsQuery.data) return;
+    defaultsApplied.current = true;
+    setForm((current) => ({
+      ...current,
+      durationTargetSeconds: appSettingsQuery.data.newProjectDurationSeconds,
+      theme: appSettingsQuery.data.newProjectTheme,
+    }));
+  }, [appSettingsQuery.data]);
+
   const [textSource, setTextSource] = useState("");
   const [markdownSource, setMarkdownSource] = useState<{ title: string; body: string }>();
   const [urlSource, setUrlSource] = useState("");

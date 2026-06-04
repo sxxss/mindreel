@@ -40,6 +40,18 @@ export const useProvidersQuery = () =>
     queryFn: apiClient.providers,
   });
 
+export const useSystemInfoQuery = () =>
+  useQuery({
+    queryKey: ["system"],
+    queryFn: apiClient.system,
+  });
+
+export const useAppSettingsQuery = () =>
+  useQuery({
+    queryKey: ["app-settings"],
+    queryFn: apiClient.appSettings,
+  });
+
 export const useArtifactQuery = (projectId: string, kind?: ArtifactKind, version?: number) =>
   useQuery({
     queryKey: ["projects", projectId, "artifacts", kind, version ?? "latest"],

@@ -36,6 +36,41 @@ export type ApiError = z.infer<typeof ApiErrorSchema>;
 export const HealthResponseSchema = z.object({ ok: z.literal(true) }).strict();
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
+// 系统信息（设置页只读展示）。
+const ProviderStatusSchema = z
+  .object({
+    provider: z.string(),
+    configured: z.boolean(),
+    baseUrl: z.string(),
+    model: z.string(),
+    voice: z.string(),
+  })
+  .strict();
+
+export const SystemInfoSchema = z
+  .object({
+    version: z.string(),
+    providerMode: z.string(),
+    dataDir: z.string(),
+    projectsDir: z.string(),
+    providersPath: z.string(),
+    projectCount: z.number().int().nonnegative(),
+    storageBytes: z.number().nonnegative(),
+    llm: ProviderStatusSchema,
+    tts: ProviderStatusSchema,
+  })
+  .strict();
+export type SystemInfo = z.infer<typeof SystemInfoSchema>;
+
+// 全局应用设置（新项目默认值）。
+export const AppSettingsSchema = z
+  .object({
+    newProjectDurationSeconds: z.number().int().min(60).max(240),
+    newProjectTheme: HtmlSlideThemeIdSchema,
+  })
+  .strict();
+export type AppSettings = z.infer<typeof AppSettingsSchema>;
+
 export const CreateProjectInputSchema = z
   .object({
     title: NonEmptyStringSchema,

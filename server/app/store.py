@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import settings
-from .models import ArtifactRef, Project, ProviderConfig
+from .models import AppSettings, ArtifactRef, Project, ProviderConfig
 
 ARTIFACT_KINDS = [
     "knowledge", "curriculum", "script", "scene-spec",
@@ -123,3 +123,42 @@ def load_providers() -> ProviderConfig:
 def save_providers(cfg: ProviderConfig) -> ProviderConfig:
     _write_json_atomic(settings.providers_file, cfg.model_dump(mode="json"))
     return cfg
+
+
+# ── 全局应用设置 ───────────────────────────────────────────────────────────────
+def load_app_settings() -> AppSettings:
+    p = settings.app_settings_file
+    if not p.is_file():
+        return AppSettings()
+    try:
+        return AppSettings.model_validate_json(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 配置损坏时回退默认，不让接口整体崩
+        return AppSettings()
+
+
+def save_app_settings(s: AppSettings) -> AppSettings:
+    _write_json_atomic(settings.app_settings_file, s.model_dump(mode="json"))
+    return s
+
+
+# ── 工作区统计 ─────────────────────────────────────────────────────────────────
+def project_count() -> int:
+    base = settings.projects_dir
+    if not base.exists():
+        return 0
+    return sum(1 for d in base.iterdir() if (d / "project.json").is_file())
+
+
+def storage_bytes() -> int:
+    """data/projects 下所有文件占用的字节数（用于设置页展示磁盘占用）。"""
+    base = settings.projects_dir
+    if not base.exists():
+        return 0
+    total = 0
+    for f in base.rglob("*"):
+        if f.is_file():
+            try:
+                total += f.stat().st_size
+            except OSError:
+                continue
+    return total
