@@ -14,6 +14,7 @@ from ..models import (
     Timeline,
     VoiceCue,
     VoiceTrack,
+    normalize_chapter_id,
 )
 
 DEFAULT_PAD_BETWEEN_MS = 200
@@ -41,6 +42,16 @@ def solve_timeline(
     scene_specs: list[SceneSpec],
     voice_track: VoiceTrack,
 ) -> Timeline:
+    # 跨产物对齐 chapterId：curriculum / script / scene-spec 可能由不同版本生成，
+    # 章节 id 不一致（如旧 curriculum 存的是 c1、新 scene-spec 已规整成 chapter_c1）。
+    # 用同一个纯函数把三方统一规整，确保按 chapterId 的匹配不会错位。
+    for chapter in curriculum.chapters:
+        chapter.id = normalize_chapter_id(chapter.id)
+    for segment in script.segments:
+        segment.chapterId = normalize_chapter_id(segment.chapterId)
+    for scene in scene_specs:
+        scene.chapterId = normalize_chapter_id(scene.chapterId)
+
     # 一个 chapter 可有多个 scene（按输入顺序保留）
     scenes_by_chapter: dict[str, list[SceneSpec]] = {}
     for scene in scene_specs:

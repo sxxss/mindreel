@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from ..models import Curriculum, Knowledge, Project, ProviderEntry
+from ..models import Curriculum, Knowledge, Project, ProviderEntry, normalize_chapter_id
 from .prompting import build_system_prompt, with_revision_instructions
 from .runner import Emit, run_json_agent
 
@@ -46,8 +46,12 @@ async def run_curriculum(project: Project, knowledge: Knowledge, llm: ProviderEn
         schema=Curriculum, constraints=_constraints(project.durationTargetSeconds),
     )
     base = _user(project, knowledge)
-    return await run_json_agent(
+    curriculum = await run_json_agent(
         llm=llm, model=Curriculum, system=system,
         build_user=lambda notes: with_revision_instructions(base, notes),
         emit=emit, name="curriculum",
     )
+    # 章节 id 是贯穿 script / scene-spec 的引用键，必须 nanoid 合规，否则渲染端会拒收。
+    for chapter in curriculum.chapters:
+        chapter.id = normalize_chapter_id(chapter.id)
+    return curriculum

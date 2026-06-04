@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
@@ -29,6 +30,7 @@ from ..models import (
     Script,
     ScriptSegment,
     Shot,
+    normalize_chapter_id,
 )
 from ..providers import ProviderError, _parse_content, complete_text, generate_json
 from .prompting import build_system_prompt, with_revision_instructions
@@ -375,6 +377,9 @@ def repair_html_slide_props(
         for idx, b in enumerate(beats):
             if not b["text"].strip():
                 continue
+            # 兜底屏：整句旁白作为居中文字卡。这里【不设 caption】——caption 会在渲染前被
+            # stripNarrationFromHtml 当作「画进画面的旁白」剔除；若设成截断的 text[:40]，
+            # 会把整句的前半截删掉、只剩尾巴标点（如「围）。」）。不设 caption 则完整显示。
             steps.append({
                 "html": (
                     '<div class="hs-panel hs-enter" style="max-width:1500px;padding:64px 72px;'
@@ -383,7 +388,6 @@ def repair_html_slide_props(
                     '<p style="font-size:46px;line-height:1.55;color:var(--ink);font-weight:600">'
                     f'{_escape_html(b["text"])}</p></div>'
                 ),
-                "caption": b["text"][:40],
             })
 
     if not steps:
@@ -583,19 +587,31 @@ async def run_visual_director(
     project: Project, knowledge: Knowledge, curriculum: Curriculum, script: Script,
     llm: ProviderEntry, emit: Emit | None = None, max_rounds: int = 1,
 ) -> list[SceneSpec]:
+    # 防御性兜底：curriculum / script 可能由旧版本生成、章节 id 不合 nanoid（如 c1）。
+    # 用同一个纯函数把两侧的 chapterId 统一规整，既救回旧工程，又保证内部匹配一致。
+    for chapter in curriculum.chapters:
+        chapter.id = normalize_chapter_id(chapter.id)
+    for segment in script.segments:
+        segment.chapterId = normalize_chapter_id(segment.chapterId)
+
     segments_by_chapter = {seg.chapterId: seg for seg in script.segments}
     revision_notes: list[str] = []
     last_issues: list[str] = []
 
+    for chapter in curriculum.chapters:
+        if segments_by_chapter.get(chapter.id) is None:
+            raise RuntimeError(f"缺少章节 {chapter.id} 的脚本 segment")
+
     for _round in range(max_rounds + 1):
-        per_chapter: list[DraftScene] = []
-        for chapter in curriculum.chapters:
-            seg = segments_by_chapter.get(chapter.id)
-            if seg is None:
-                raise RuntimeError(f"缺少章节 {chapter.id} 的脚本 segment")
-            per_chapter.extend(
-                await _generate_chapter_scenes(project, chapter, seg, llm, revision_notes, emit)
+        # 各章节互相独立，并发生成（原来逐章串行是本阶段最大的耗时来源）。
+        # gather 保序返回，章节顺序与 curriculum.chapters 一致，不影响后续 critic 的章序校验。
+        results = await asyncio.gather(*(
+            _generate_chapter_scenes(
+                project, chapter, segments_by_chapter[chapter.id], llm, revision_notes, emit,
             )
+            for chapter in curriculum.chapters
+        ))
+        per_chapter: list[DraftScene] = [s for chapter_scenes in results for s in chapter_scenes]
 
         scenes = ensure_unique_scene_ids(dedupe_beat_coverage(per_chapter))
         issues = review_scenes(scenes, curriculum, script)

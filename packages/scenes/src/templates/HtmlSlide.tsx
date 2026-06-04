@@ -81,28 +81,43 @@ export const HtmlSlide: SceneTemplateDefinition<HtmlSlideProps> = {
       extrapolateRight: "clamp",
     });
 
+    // 注入 HTML 一律按 1920×1080 画布设计。关键：用「固定舞台 + 等比缩放」呈现，
+    // 而不是塞进一个被裁小的盒子——否则 1080 高的画布会被压扁，按 bottom: 定位的元素
+    // 会撞到按 top: 定位的元素，整屏重叠。等比缩放则让绝对定位 1:1 保真。
+    const STAGE_W = 1920;
+    const STAGE_H = 1080;
+    const RESERVE_BOTTOM = 170; // 底部留给 SubtitleTrack 字幕条，内容不进这条带
+    const fitScale = (STAGE_H - RESERVE_BOTTOM) / STAGE_H; // 等比缩放系数（受高度约束）
+    const stageLeft = (STAGE_W - STAGE_W * fitScale) / 2; // 缩放后水平居中的左边距
+
     const stepLayer = (html: string, opacity: number, translateY: number, scale: number, ht?: number) => (
       <div
         style={{
           position: "absolute",
-          inset: 0,
+          left: stageLeft,
+          top: 0,
+          width: STAGE_W,
+          height: STAGE_H,
+          transformOrigin: "top left",
+          transform: `scale(${fitScale})`,
           opacity,
-          transform: `translateY(${translateY}px) scale(${scale})`,
-          ...(ht !== undefined ? ({ "--hs-t": String(ht) } as React.CSSProperties) : {}),
         }}
       >
-        {/* 注入 HTML 的宿主：给一个「明确满尺寸 + 定位上下文 + 居中」的盒子，
-            这样 LLM 写的 height:100% / position:absolute 都能正常工作（避免高度塌成 0
-            导致 overflow:hidden 把整屏裁空），短内容则居中显示。 */}
+        {/* 固定 1920×1080 舞台 + 居中：兼容两种 LLM 写法——
+            ① 满屏舞台式（root 自带 width:1920;height:1080 + position:absolute 子元素）：
+               作为 flex 子项正好铺满，绝对定位 1:1 保真；
+            ② 居中面板式（如 <div class="hs-panel" style="max-width:1500px">，无定位）：
+               由 flex 在舞台内水平垂直居中显示，而不是堆到左上角被裁。 */}
         <div
           style={{
             position: "absolute",
             inset: 0,
+            overflow: "hidden",
             display: "flex",
-            flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            overflow: "hidden",
+            transform: `translateY(${translateY}px) scale(${scale})`,
+            ...(ht !== undefined ? ({ "--hs-t": String(ht) } as React.CSSProperties) : {}),
           }}
           dangerouslySetInnerHTML={{ __html: html }}
         />
@@ -123,33 +138,17 @@ export const HtmlSlide: SceneTemplateDefinition<HtmlSlideProps> = {
         }}
       >
         <style dangerouslySetInnerHTML={{ __html: baseCss }} />
-        {props.title ? (
-          <div style={{ position: "absolute", left: 80, top: 56, fontSize: 40, fontWeight: 700 }}>
-            {props.title}
-          </div>
-        ) : null}
-        <div
-          style={{
-            position: "absolute",
-            left: 64,
-            right: 64,
-            top: props.title ? 130 : 64,
-            // 底部留出 ~170px 给 SubtitleTrack 旁白字幕条（视频里字幕由 SubtitleTrack 统一渲染，
-            // 这里不再画 step.caption，避免出现「两条字幕」）。
-            bottom: 170,
-          }}
-        >
-          {prev !== undefined && enterT < 1
-            ? stepLayer(stripNarrationFromHtml(prev.html, prev.caption), 1 - enterT, 0, 1, 1)
-            : null}
-          {stepLayer(
-            stripNarrationFromHtml(step.html, step.caption),
-            enterT,
-            (1 - enterT) * 18,
-            0.985 + enterT * 0.015,
-            hsT,
-          )}
-        </div>
+        {/* 每屏 HTML 自带标题；这里不再叠加场景标题，避免与缩放留白边重叠/被裁。 */}
+        {prev !== undefined && enterT < 1
+          ? stepLayer(stripNarrationFromHtml(prev.html, prev.caption), 1 - enterT, 0, 1, 1)
+          : null}
+        {stepLayer(
+          stripNarrationFromHtml(step.html, step.caption),
+          enterT,
+          (1 - enterT) * 18,
+          0.985 + enterT * 0.015,
+          hsT,
+        )}
       </div>
     );
   },

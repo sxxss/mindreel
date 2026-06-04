@@ -5,11 +5,29 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 # ── 通用 ──────────────────────────────────────────────────────────────────────
+# Node 渲染端用 nanoid 规则校验所有 id：^[A-Za-z0-9_-]{6,64}$（注意至少 6 位）。
+_NANO_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,64}")
+
+
+def normalize_chapter_id(raw: str) -> str:
+    """把模型给的章节 id 规整成 nanoid 合规形式。
+
+    纯函数、确定性：同一 raw 永远映射到同一结果，因此可以在 curriculum、script、
+    scene-spec 多处独立调用而互相一致。模型常把章节命名成 `c1`（仅 2 位），过不了
+    渲染端 `{6,64}` 的最小长度，这里统一补成 `chapter_<sanitized>`。
+    """
+    if raw and _NANO_ID_RE.fullmatch(raw):
+        return raw
+    sanitized = re.sub(r"[^A-Za-z0-9_-]", "_", raw or "").strip("_")
+    return f"chapter_{sanitized}"[:64] if sanitized else "chapter_0"
+
+
 ChapterKind = Literal["hook", "concept", "derivation", "example", "recap"]
 ProjectStatus = Literal["draft", "active", "archived"]
 ThemeId = Literal["deep-space", "aurora", "sunset", "mono"]
@@ -241,3 +259,9 @@ class ProviderConfig(BaseModel):
     image: ProviderEntry = ProviderEntry(provider="disabled")
     video: ProviderEntry = ProviderEntry(provider="disabled")
     factCheck: ProviderEntry = ProviderEntry(provider="disabled")
+
+
+# ── 全局应用设置（新项目默认值等）─────────────────────────────────────────────
+class AppSettings(BaseModel):
+    newProjectDurationSeconds: int = Field(default=150, ge=60, le=240)
+    newProjectTheme: ThemeId = DEFAULT_THEME

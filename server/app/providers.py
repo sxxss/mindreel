@@ -85,6 +85,71 @@ def _balanced_spans(text: str) -> list[str]:
 
 _VALUE_START = set('"{[+-.0123456789') | {"t", "f", "n"}  # JSON 值合法的起始字符
 
+_BARE_KEY_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def _normalize_quotes_and_keys(text: str) -> str:
+    """修「键没用双引号」「字符串用单引号」这两类——它们都会让 json.loads 报
+    'Expecting property name enclosed in double quotes'。字符串感知，只在双引号
+    字符串之外动手，绝不碰已经合法的双引号内容（如 HTML 片段）。
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_str = False  # 是否在双引号字符串里
+    esc = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "'":  # 单引号字符串 → 双引号
+            j = i + 1
+            buf: list[str] = []
+            while j < n and text[j] != "'":
+                c = text[j]
+                if c == "\\" and j + 1 < n:
+                    nxt = text[j + 1]
+                    buf.append(nxt if nxt == "'" else "\\" + nxt)
+                    j += 2
+                    continue
+                buf.append({'"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(c, c))
+                j += 1
+            out.append('"' + "".join(buf) + '"')
+            i = j + 1
+            continue
+        if ch in "{,":  # 紧跟其后的裸键补双引号
+            out.append(ch)
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            m = _BARE_KEY_RE.match(text, j)
+            if m:
+                p = m.end()
+                while p < n and text[p] in " \t\r\n":
+                    p += 1
+                if p < n and text[p] == ":":  # 后面是冒号才算键
+                    out.append(text[i + 1:j])  # 原样保留空白
+                    out.append('"' + m.group(0) + '"')
+                    i = m.end()
+                    continue
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
 
 def _repair_json(text: str) -> str:
     """字符串感知地修三类 deepseek 高频小毛病（只在字符串外动手，绝不碰 HTML 内容）：
@@ -169,9 +234,12 @@ def _iter_json_candidates(text: str):
     yield from spans
     # 3) 原文整体
     yield text.strip()
-    # 4) 上述候选的「修复版」（补空值、删拖尾逗号）—— 放最后，原文能解析就不动它
+    # 4) 上述候选的「修复版」（补空值、删拖尾逗号、单引号/裸键转双引号）——
+    #    放最后，原文能解析就不动它；多种修复叠加，覆盖模型的各类不规范输出。
     for cand in [*spans, text.strip()]:
         yield _repair_json(cand)
+        yield _normalize_quotes_and_keys(cand)
+        yield _repair_json(_normalize_quotes_and_keys(cand))
 
 
 def _parse_content(content: str) -> Any:
