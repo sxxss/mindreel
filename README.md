@@ -149,7 +149,7 @@ packages/
 pnpm dev:api      # 起 Python API（需先装好 server 依赖）
 pnpm dev:web      # 起 Web
 pnpm typecheck    # 前端 / 渲染 / 共享包类型检查
-pnpm build        # 构建前端
+pnpm build        # 构建前端与渲染产物
 pnpm test         # 跑测试
 ```
 

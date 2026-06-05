@@ -1,6 +1,6 @@
-# Mindreel 服务端（Python / FastAPI）
+# MindReel 服务端（Python / FastAPI）
 
-`server/` 是 Mindreel 的后端：负责 API、各阶段 Agent、流水线编排，把每阶段产物写成
+`server/` 是 MindReel 的后端：负责 API、各阶段 Agent、流水线编排，把每阶段产物写成
 `data/` 下的 JSON。视频渲染由 Node 的 Remotion 工程负责（`apps/render`），后端通过子进程
 调用它（两边以 `data/projects/<id>/artifacts/*` 的 JSON 为契约）。
 

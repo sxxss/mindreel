@@ -150,7 +150,7 @@ packages/
 pnpm dev:api      # start Python API (needs server deps installed)
 pnpm dev:web      # start Web
 pnpm typecheck    # type-check frontend / render / shared
-pnpm build        # build
+pnpm build        # build frontend + render bundle
 pnpm test         # run tests
 ```
 
